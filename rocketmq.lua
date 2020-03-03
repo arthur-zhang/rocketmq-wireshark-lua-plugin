@@ -132,14 +132,6 @@ end
 local NAME = "RocketMQ"
 local protoMQ = Proto.new(NAME, "RocketMQ Protocol")
 
-local fields = {
-    length = ProtoField.uint32(NAME .. ".length", "Length"),
-    bodyData = ProtoField.string(NAME .. ".body_data", "Body"),
-    headerData = ProtoField.string(NAME .. ".header_data", "Header"),
-}
-
-protoMQ.fields = fields
-
 function decodeMessageExt(bodyTree, pinfo, bodyData)
     local bodyTree = bodyTree:add("Body", "")
 
