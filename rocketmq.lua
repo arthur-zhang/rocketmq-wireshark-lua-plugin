@@ -267,41 +267,140 @@ local responseCode = {
 }
 
 local PORTS = { 9876, 10911, 20111 }
-function isUp(dstPort)
+
+function isUpDirection(dstPort)
     for _, port in ipairs(PORTS) do
         if (dstPort == port) then
             return true
         end
     end
-
     return false
 end
 
 local NAME = "RocketMQ"
 local protoMQ = Proto.new(NAME, "RocketMQ Protocol")
 
---local function DefineAndRegisterRocketmqDissector()
---
---
---end
 local fields = {
     length = ProtoField.uint32(NAME .. ".length", "Length"),
-    headerLength = ProtoField.uint32(NAME .. ".header_length", "Header Length"),
     bodyData = ProtoField.string(NAME .. ".body_data", "Body"),
-    brokerDatas = ProtoField.string(NAME .. ".body.brokerDatas", "broker_datas"),
-
-    --    header zone
     headerData = ProtoField.string(NAME .. ".header_data", "Header"),
-    --    headerCode = ProtoField.uint32(NAME .. ".header.code", "code"),
-    --    headerFlag = ProtoField.uint32(NAME .. ".header.flag", "flag"),
-    --    headerLanguage = ProtoField.string(NAME .. ".header.language", "language"),
-    --    headerOpaque = ProtoField.uint32(NAME .. ".header.opaque", "opaque"),
-    --    headerSerializeTypeCurrentRPC = ProtoField.string(NAME .. ".header.serializeType", "serializeTypeCurrentRPC"),
-    --    headerVersion = ProtoField.string(NAME .. ".header.version", "version"),
-    --    headerExtFields = ProtoField.string(NAME .. ".header.extFields", "extFields"),
 }
 
 protoMQ.fields = fields
+
+function decodeMessageExt(bodyTree, pinfo, bodyData)
+    local bodyTree = bodyTree:add("Body", "")
+
+    pinfo.cols.info:append(">>>>#FOUND#")
+
+    local offset = 0;
+
+    bodyTree:add("totalSize", bodyData(offset, 4):int())
+    offset = offset + 4;
+
+    local magicCode = string.format("0X%8.8X", bodyData(offset, 4):uint())
+    bodyTree:add("magicCode", magicCode)
+    offset = offset + 4;
+
+    bodyTree:add("bodyCRC", bodyData(offset, 4):int())
+    offset = offset + 4;
+
+    bodyTree:add("queueId", bodyData(offset, 4):int())
+    offset = offset + 4;
+
+    bodyTree:add("flag", bodyData(offset, 4):int())
+    offset = offset + 4;
+
+    bodyTree:add("queueOffset", bodyData(offset, 8):int64():tonumber())
+    offset = offset + 8;
+
+    bodyTree:add("physicOffset", bodyData(offset, 8):int64():tonumber())
+    offset = offset + 8;
+
+    bodyTree:add("sysFlag", bodyData(offset, 4):int())
+    offset = offset + 4;
+
+
+    bodyTree:add("bornTimeStamp", bodyData(offset, 8):int64():tonumber())
+    offset = offset + 8;
+
+    local bornHost = bodyData(offset, 1):uint()
+            .. "." .. bodyData(offset + 1, 1):uint()
+            .. "." .. bodyData(offset + 2, 1):uint()
+            .. "." .. bodyData(offset + 3, 1):uint()
+
+    bodyTree:add("bornHost", bornHost)
+    offset = offset + 4;
+
+    bodyTree:add("port", bodyData(offset, 4):int())
+    offset = offset + 4;
+    bodyTree:add("storeTimestamp", bodyData(offset, 8):int64():tonumber())
+    offset = offset + 8;
+
+    local storeHost = bodyData(offset, 1):uint()
+            .. "." .. bodyData(offset + 1, 1):uint()
+            .. "." .. bodyData(offset + 2, 1):uint()
+            .. "." .. bodyData(offset + 3, 1):uint()
+    bodyTree:add("storeHost", storeHost)
+    offset = offset + 4;
+
+    bodyTree:add("storePort", bodyData(offset, 4):int())
+    offset = offset + 4;
+
+    --13 RECONSUMETIMES
+    bodyTree:add("reconsumeTimes", bodyData(offset, 4):int())
+    offset = offset + 4;
+    --14 Prepared Transaction Offset
+    bodyTree:add("preparedTransactionOffset", bodyData(offset, 8):int64():tonumber())
+    offset = offset + 8;
+    --15 BODY
+    local bodyLen = bodyData(offset, 4):int()
+    --            bodyTree:add("bodyLen", bodyLen)
+    offset = offset + 4;
+
+    bodyTree:add("body:", bodyData(offset, bodyLen):string())
+    offset = offset + bodyLen;
+
+    --16 TOPIC
+    local topicLen = bodyData(offset, 1):int()
+    offset = offset + 1;
+    --            bodyTree:add("topicLen", topicLen)
+    local topic = bodyData(offset, topicLen):string()
+    bodyTree:add("topic:", topic)
+    pinfo.cols.info:append(" topic:" .. topic)
+
+    offset = offset + topicLen;
+
+    --17 properties
+    local propertiesLength = bodyData(offset, 2):int()
+    offset = offset + 2;
+    bodyTree:add("propertiesLength", propertiesLength)
+
+    if (propertiesLength > 0) then
+        local propertiesStr = bodyData(offset, propertiesLength):string()
+        offset = offset + propertiesLength
+        local propertiesTree = bodyTree:add("propertiesStr", "size: " .. propertiesLength)
+        for k, v in string.gmatch(propertiesStr, "(%w+)\1(%w+)") do
+            propertiesTree:add(k, v)
+        end
+    end
+end
+
+function parseAndAddTree(k, v, tree)
+    if (type(v) == 'table') then
+        local sizeStr = ""
+        if (#v > 0) then
+            sizeStr = "size: " .. #v
+        end;
+        local childTree = tree:add(k, sizeStr, tree)
+        for key, value in pairs(v) do
+            parseAndAddTree(key, value, childTree)
+        end
+    else
+        tree:add(k .. ":", json.stringify(v))
+    end
+end
+
 
 function protoMQ.dissector(tvb, pinfo, tree)
     local srcPort = pinfo.src_port;
@@ -313,16 +412,15 @@ function protoMQ.dissector(tvb, pinfo, tree)
 
     local length = tvb(0, 4):uint()
 
-    subtree:add(fields.length, length)
+    subtree:add("Length", length)
     local headerLength = tvb(4, 4):uint()
-    subtree:add(fields.headerLength, headerLength)
     local headerData = tvb(8, headerLength):string()
-    local headerTree = subtree:add(fields.headerData, "")
     local header = json.parse(headerData, 1, "}")
+    local headerTree = subtree:add("Header", "")
 
     local isRemarkFound = false
 
-    if (isUp(dstPort)) then
+    if (isUpDirection(dstPort)) then
         --        request
         pinfo.cols.info:append("[REQUEST]" .. "↑↑↑")
         for k, v in pairs(header) do
@@ -332,6 +430,13 @@ function protoMQ.dissector(tvb, pinfo, tree)
                     break;
                 end
                 pinfo.cols.info:append(" code=" .. v .. "(" .. codeStr .. ")")
+            end
+        end
+        for k, v in pairs(header) do
+            if (k == "extFields") then
+                if (v["topic"] ~= nil) then
+                    pinfo.cols.info:append(" topic:" .. v["topic"])
+                end
             end
         end
     else
@@ -354,135 +459,23 @@ function protoMQ.dissector(tvb, pinfo, tree)
     end
 
     for k, v in pairs(header) do
-        headerTree:add(k, json.stringify(v))
+        parseAndAddTree(k, v, headerTree)
     end
 
-    --    headerTree:add(fields.headerCode, header["code"])
-    --    headerTree:add(fields.headerFlag, header["flag"])
-    --    headerTree:add(fields.headerLanguage, header["language"])
-    --    headerTree:add(fields.headerSerializeTypeCurrentRPC, header["serializeTypeCurrentRPC"])
-    --    headerTree:add(fields.headerVersion, header["version"])
-    --    headerTree:add(fields.headerExtFields, json.stringify(header["extFields"]))
-
-
-
-    local ending = tvb:len()
-
-    --    local bodyData = tvb(8 + headerLength, ending - 8 - headerLength):string()
-    local bodyData = tvb(8 + headerLength, ending - 8 - headerLength)
-
-    local bodyDataLen = ending - 8 - headerLength
---    pinfo.cols.info:append(">>>>bodyDataLen:")
---    pinfo.cols.info:append(bodyDataLen)
-
+    local bodyDataLen = tvb:len() - 8 - headerLength
 
     if (bodyDataLen <= 0) then
         return
     end
-    local bodyTree = subtree:add(fields.bodyData, "")
+    local bodyData = tvb(8 + headerLength, bodyDataLen)
 
     if (bodyData ~= nil and bodyData:len() > 0) then
         if (not isRemarkFound) then
             bodyData = bodyData:string()
             local body = json.parse(bodyData, 1, "}")
-            pinfo.cols.info:append(" ")
-            for k, bodyItem in pairs(body) do
-                local childTree = bodyTree:add(k, "")
-                for key, value in pairs(bodyItem) do
-                    childTree:add(key, json.stringify(value))
-                end
-            end
+            parseAndAddTree("Body", body, subtree)
         else
-            pinfo.cols.info:append(">>>>#FOUND#")
-
-            local offset = 0;
-
-            bodyTree:add("totalSize", bodyData(offset, 4):int())
-            offset = offset + 4;
-
-            local magicCode = string.format("0X%8.8X", bodyData(offset, 4):uint())
-            bodyTree:add("magicCode", magicCode)
-            offset = offset + 4;
-
-            bodyTree:add("bodyCRC", bodyData(offset, 4):int())
-            offset = offset + 4;
-
-            bodyTree:add("queueId", bodyData(offset, 4):int())
-            offset = offset + 4;
-
-            bodyTree:add("flag", bodyData(offset, 4):int())
-            offset = offset + 4;
-
-            bodyTree:add("queueOffset", bodyData(offset, 8):int64():tonumber())
-            offset = offset + 8;
-
-            bodyTree:add("physicOffset", bodyData(offset, 8):int64():tonumber())
-            offset = offset + 8;
-
-            bodyTree:add("sysFlag", bodyData(offset, 4):int())
-            offset = offset + 4;
-
-
-            bodyTree:add("bornTimeStamp", bodyData(offset, 8):int64():tonumber())
-            offset = offset + 8;
-
-            local bornHost = bodyData(offset, 1):uint()
-                    .. "." .. bodyData(offset + 1, 1):uint()
-                    .. "." .. bodyData(offset + 2, 1):uint()
-                    .. "." .. bodyData(offset + 3, 1):uint()
-
-            bodyTree:add("bornHost", bornHost)
-            offset = offset + 4;
-
-            bodyTree:add("port", bodyData(offset, 4):int())
-            offset = offset + 4;
-            bodyTree:add("storeTimestamp", bodyData(offset, 8):int64():tonumber())
-            offset = offset + 8;
-
-            local storeHost = bodyData(offset, 1):uint()
-                    .. "." .. bodyData(offset + 1, 1):uint()
-                    .. "." .. bodyData(offset + 2, 1):uint()
-                    .. "." .. bodyData(offset + 3, 1):uint()
-            bodyTree:add("storeHost", storeHost)
-            offset = offset + 4;
-
-            bodyTree:add("storePort", bodyData(offset, 4):int())
-            offset = offset + 4;
-
-            --13 RECONSUMETIMES
-            bodyTree:add("reconsumeTimes", bodyData(offset, 4):int())
-            offset = offset + 4;
-            --14 Prepared Transaction Offset
-            bodyTree:add("preparedTransactionOffset", bodyData(offset, 8):int64():tonumber())
-            offset = offset + 8;
-            --15 BODY
-            local bodyLen = bodyData(offset, 4):int()
---            bodyTree:add("bodyLen", bodyLen)
-            offset = offset + 4;
-
-            bodyTree:add("body:", bodyData(offset, bodyLen):string())
-            offset = offset + bodyLen;
-
-            --16 TOPIC
-            local topicLen = bodyData(offset, 1):int()
-            offset = offset + 1;
---            bodyTree:add("topicLen", topicLen)
-            bodyTree:add("topic:", bodyData(offset, topicLen):string())
-            offset = offset + topicLen;
-
-            --17 properties
-            local propertiesLength = bodyData(offset, 2):int()
-            offset = offset + 2;
-            bodyTree:add("propertiesLength", propertiesLength)
-
-            if (propertiesLength > 0) then
-                local propertiesStr = bodyData(offset, propertiesLength):string()
-                offset = offset + propertiesLength
-                local propertiesTree = bodyTree:add("propertiesStr", "size: " .. propertiesLength)
-                for k, v in string.gmatch(propertiesStr, "(%w+)\1(%w+)") do
-                    propertiesTree:add(k, v)
-                end
-            end
+            decodeMessageExt(subtree, pinfo, bodyData)
         end
     end
 end
