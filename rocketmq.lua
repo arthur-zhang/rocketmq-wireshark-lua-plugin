@@ -82,6 +82,9 @@ local requestCodeMap = {
     [317] = "GET_BROKER_CONSUME_STATS",
     [318] = "UPDATE_NAMESRV_CONFIG",
     [319] = "GET_NAMESRV_CONFIG",
+    [320] = "SEND_BATCH_MESSAGE",
+    [321] = "QUERY_CONSUME_QUEUE",
+    [322] = "QUERY_DATA_VERSION",
 }
 
 local responseCode = {
@@ -316,8 +319,12 @@ function protoMQ.dissector(tvb, pinfo, tree)
     if (bodyData ~= nil and bodyData:len() > 0) then
         if (not isRemarkFound) then
             bodyData = bodyData:string()
-            local body = json.parse(bodyData, 1, "}")
-            parseAndAddTree("Body", body, subtree)
+            if (bodyData:sub(1, 1) == '{' or bodyData:sub(1, 1) == '[') then
+                local body = json.parse(bodyData, 1, "}")
+                parseAndAddTree("Body", body, subtree)
+            else
+                subtree:add("Body:", bodyData)
+            end
         else
             decodeMessageExt(subtree, pinfo, bodyData)
         end
