@@ -247,14 +247,20 @@ end
 
 
 function protoMQ.dissector(tvb, pinfo, tree)
+    -- reassemble tcp segments
+    local length = tvb(0, 4):uint()
+    if (tvb:len() - 4) < length then
+        pinfo.desegment_len = length - (tvb:len() - 4)
+        pinfo.desegment_offset = 0
+        return
+    end
+
     local srcPort = pinfo.src_port;
     local dstPort = pinfo.dst_port;
 
     local subtree = tree:add(protoMQ, tvb())
     pinfo.cols.protocol = protoMQ.name;
     pinfo.cols.info = ""
-
-    local length = tvb(0, 4):uint()
 
     subtree:add("Length", length)
     local headerLength = tvb(4, 4):uint()
